@@ -16,6 +16,8 @@ const LIST := [
 		"desc": "Malédiction : vous et la cible échangez vos voix (20 s)."},
 ]
 
+const WHISPER_MAX := 0.3   # volume max pour la règle « Chuchotements »
+
 const MISFIRES := ["chicken", "backfire", "fish", "helium_self"]
 const MISFIRE_TEXT := {
 	"chicken": "Sort raté… vous êtes une poule !",
@@ -36,3 +38,19 @@ static func get_def(id: String) -> Dictionary:
 static func power_from_voice(duration: float, level: float) -> float:
 	var p := clampf(0.7 + (duration - 0.45) * 0.9, 0.7, 3.0)
 	return p * lerpf(0.8, 1.25, clampf(level, 0.0, 1.0))
+
+
+## Règles loufoques tirées au sort à chaque manche : id -> [titre, description]
+const RULES := {
+	"normal": ["Règles normales", "Que le meilleur magicien gagne."],
+	"chuchotements": ["Chuchotements", "Seuls les sorts MURMURÉS marchent. Criez et c'est raté !"],
+	"opera": ["Opéra", "Chantez ! Tenez la note : sort court = raté, sort long = énorme."],
+	"maudit": ["Grimoire maudit", "Les sorts sont mélangés en secret ! Quel mot fait quoi ?"],
+	"lune": ["Basse gravité", "Gravité lunaire : les explosions envoient TRÈS loin."],
+	"poulailler": ["Poulailler", "Tout le monde commence en poule pendant 20 secondes."],
+}
+
+const MODES := {
+	"bataille": ["Bataille", "Le plus d'éliminations gagne la manche."],
+	"roi": ["Roi du silence", "Prenez la couronne et gardez-la… SANS PARLER. 1 point par seconde."],
+}

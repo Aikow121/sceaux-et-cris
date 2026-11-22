@@ -133,9 +133,11 @@ func _send_chunk(chunk: PackedFloat32Array) -> void:
 	if rms > GATE:
 		_hang = HANGOVER
 	else:
-		_hang -= float(PACKET) / RATE
+		_hang = maxf(0.0, _hang - float(PACKET) / RATE)
 	if _hang <= 0.0 or not transmit:
 		return
+	if main != null:
+		main.on_local_voice_activity()
 	if main == null or not main.in_game or multiplayer.get_peers().is_empty():
 		return
 	voice_packet.rpc(encode(chunk))

@@ -23,6 +23,12 @@ var _pause: Label
 var _score: PanelContainer
 var _score_grid: GridContainer
 var _flash: ColorRect
+var _round_title: Label
+var _round_desc: Label
+var _timer: Label
+var _crown_banner: Label
+var _force_scores := 0.0
+var _mode := "bataille"
 
 
 func _ready() -> void:
@@ -101,6 +107,27 @@ func _ready() -> void:
 	help.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	help.grow_vertical = Control.GROW_DIRECTION_BEGIN
 
+	var top := VBoxContainer.new()
+	_root.add_child(top)
+	top.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP, Control.PRESET_MODE_MINSIZE, 10)
+	top.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_timer = _label(28)
+	_timer.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	top.add_child(_timer)
+	_round_title = _label(16)
+	_round_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_round_title.modulate = Color(1, 0.85, 0.4)
+	top.add_child(_round_title)
+	_round_desc = _label(13)
+	_round_desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_round_desc.modulate = Color(1, 1, 1, 0.75)
+	top.add_child(_round_desc)
+	_crown_banner = _label(22)
+	_crown_banner.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_crown_banner.modulate = Color(1, 0.85, 0.2)
+	_crown_banner.text = "VOUS PORTEZ LA COURONNE — SILENCE !"
+	top.add_child(_crown_banner)
+
 	_feed = VBoxContainer.new()
 	_feed.custom_minimum_size = Vector2(420, 0)
 	_root.add_child(_feed)
@@ -152,7 +179,12 @@ func _process(delta: float) -> void:
 	if _center_t <= 0.0:
 		_center.text = ""
 	_pause.visible = Input.mouse_mode != Input.MOUSE_MODE_CAPTURED and not get_parent().draw_ui.is_open()
-	_score.visible = Input.is_action_pressed("scoreboard")
+	_force_scores -= delta
+	_score.visible = Input.is_action_pressed("scoreboard") or _force_scores > 0.0
+	var m: Node = get_parent()
+	var tl: float = m.round_left
+	_timer.text = "%d:%02d" % [int(tl) / 60, int(tl) % 60] if m.round_num > 0 else ""
+	_crown_banner.visible = is_instance_valid(player) and m.crown_holder == String(player.name) and m.mode == "roi"
 	_mic.value = get_parent().voice.level
 	if not is_instance_valid(player):
 		return
@@ -205,18 +237,38 @@ func add_feed(text: String, col := Color.WHITE) -> void:
 	get_tree().create_timer(7.0).timeout.connect(l.queue_free)
 
 
-func update_scores(stats: Dictionary) -> void:
+func set_round(title: String, desc: String) -> void:
+	_round_title.text = title
+	_round_desc.text = desc
+
+
+func show_scores_for(t: float) -> void:
+	_force_scores = t
+
+
+func update_scores(stats: Dictionary, mode := "bataille") -> void:
+	_mode = mode
+	_score_grid.columns = 4 if mode == "roi" else 3
 	for c in _score_grid.get_children():
 		c.queue_free()
-	for h in ["Magicien", "Éliminations", "Morts"]:
+	var headers := ["Magicien", "Éliminations", "Morts"]
+	if mode == "roi":
+		headers.append("Points couronne")
+	for h in headers:
 		var l := _label(20)
 		l.text = h
 		l.modulate = Color(1, 0.85, 0.4)
 		_score_grid.add_child(l)
 	var rows := stats.values()
-	rows.sort_custom(func(a, b): return a.kills > b.kills)
+	if mode == "roi":
+		rows.sort_custom(func(a, b): return a.get("points", 0.0) > b.get("points", 0.0))
+	else:
+		rows.sort_custom(func(a, b): return a.kills > b.kills)
 	for s in rows:
-		for v in [s.name, str(s.kills), str(s.deaths)]:
+		var vals := [s.name, str(s.kills), str(s.deaths)]
+		if mode == "roi":
+			vals.append(str(int(s.get("points", 0.0))))
+		for v in vals:
 			var l := _label(18)
 			l.text = v
 			_score_grid.add_child(l)

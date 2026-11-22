@@ -9,6 +9,22 @@ Party game de magiciens entre amis, en première personne :
 - **malédictions de voix** : Hélium (voix suraiguë) et Échange de voix (votre voix sort du corps de l'autre) ;
 - **replay du « dernier mot »** : à votre mort, vous réentendez l'incantation de votre tueur puis vos derniers mots.
 
+## Manches et règles loufoques
+Les parties se jouent en **manches de 2 min 30**. À chaque manche, une règle est tirée au sort :
+| Règle | Effet |
+|---|---|
+| Chuchotements | Seuls les sorts murmurés marchent ; crier = sort raté |
+| Opéra | Il faut chanter : sort court = raté, sort tenu = x1,5 |
+| Grimoire maudit | Les sorts sont mélangés en secret |
+| Basse gravité | Gravité lunaire, reculs x1,8 |
+| Poulailler | Tout le monde commence en poule 20 s |
+| Règles normales | — |
+
+## Modes (choisis par l'hôte)
+- **Bataille** : le plus d'éliminations gagne la manche.
+- **Roi du silence** : une couronne apparaît au milieu du pont, au-dessus de la lave. Celui qui la porte
+  gagne 1 point par seconde… mais s'il **parle** ou **lance un sort**, il la lâche. Mourir aussi.
+
 ## Lancer
 1. Godot **4.3 ou plus récent** (version standard).
 2. *Importer* → `project.godot` → **F5**.
@@ -52,6 +68,10 @@ ZQSD/WASD bouger · Maj courir · Espace sauter · **Clic droit ou V maintenu : 
 (IP locale en réseau local ; par Internet, rediriger le port UDP 7777 sur la box de l'hôte).
 Les mannequins d'entraînement servent de cibles.
 
+## Crédits
+- Personnage du mage : **KayKit Character Pack : Adventurers** par Kay Lousberg (www.kaylousberg.com),
+  licence CC0 (domaine public) — voir `assets/kaykit/LICENSE_KayKit.txt`.
+
 ## Comment ça marche (technique)
 - `scripts/voice.gd` : micro via un bus muet « Micro » + `AudioEffectCapture`, rééchantillonnage
   16 kHz, compression µ-law, envoi seulement quand on parle, lecture en `AudioStreamPlayer3D`
@@ -69,4 +89,4 @@ Les mannequins d'entraînement servent de cibles.
 - La voix n'est pas compressée comme sur Discord (~128 kbit/s par joueur qui parle) : parfait en
   réseau local, correct par Internet à 4-6 joueurs.
 - Les pièges posés avant l'arrivée d'un joueur ne lui sont pas envoyés.
-- Pas encore de sons ni de vrais modèles 3D.
+- Pas encore de sons ; le décor est encore fait de formes simples.

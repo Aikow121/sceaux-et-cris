@@ -13,6 +13,9 @@ const JUMP := 7.5
 const MOUSE_SENS := 0.0022
 const PITCH_MAX := 1.55
 const HEAD_Y := 0.6
+const MAGE_SCENE := preload("res://assets/kaykit/Mage.glb")   # KayKit (CC0) — Kay Lousberg
+const MODEL_SCALE := 0.72
+const LOOPING := ["Idle", "Running_A", "Walking_A", "Walking_Backwards", "Jump_Idle", "Spellcasting", "Cheer"]
 
 var main: Node
 var display_name := "Magicien"
@@ -35,6 +38,11 @@ var _pitch_fx: AudioEffectPitchShift
 
 var _shape: CollisionShape3D
 var _wizard_vis: Node3D
+var _model: Node3D
+var _anim: AnimationPlayer
+var _anim_lock := 0.0
+var _remote_vel := Vector3.ZERO
+var _last_pos := Vector3.ZERO
 var _chicken_vis: Node3D
 var _label: Label3D
 var _speak_label: Label3D
@@ -202,25 +210,60 @@ func _cylinder(r: float, h: float, c: Color, top := -1.0) -> MeshInstance3D:
 
 
 func _build_wizard() -> void:
+	# Modèle animé KayKit, robe et chapeau teintés à la couleur du joueur
 	_wizard_vis = Node3D.new()
 	add_child(_wizard_vis)
-	var robe := _cylinder(0.45, 1.3, color, 0.24)
-	robe.position.y = -0.25
-	_wizard_vis.add_child(robe)
-	var face := _sphere(0.22, Color("#f1c9a5"))
-	face.position.y = HEAD_Y
-	_wizard_vis.add_child(face)
-	var beard := _cylinder(0.16, 0.35, Color(0.92, 0.92, 0.92), 0.02)
-	beard.rotation_degrees.x = 180
-	beard.position = Vector3(0, HEAD_Y - 0.22, -0.12)
-	_wizard_vis.add_child(beard)
-	var brim := _cylinder(0.42, 0.04, color.darkened(0.35))
-	brim.position.y = HEAD_Y + 0.17
-	_wizard_vis.add_child(brim)
-	var hat := _cylinder(0.27, 0.6, color.darkened(0.35), 0.0)
-	hat.position.y = HEAD_Y + 0.48
-	hat.rotation_degrees.x = -12
-	_wizard_vis.add_child(hat)
+	_model = MAGE_SCENE.instantiate()
+	_model.scale = Vector3.ONE * MODEL_SCALE
+	_model.position.y = -0.9
+	_model.rotation.y = PI            # le modèle regarde vers +Z
+	_wizard_vis.add_child(_model)
+	for hidden in ["2H_Staff", "Spellbook", "Spellbook_open"]:
+		var n := _model.find_child(hidden, true, false)
+		if n:
+			n.visible = false
+	for part in ["Mage_Body", "Mage_Cape", "Mage_Hat"]:
+		var mi := _model.find_child(part, true, false) as MeshInstance3D
+		if mi and mi.mesh:
+			var m := (mi.mesh.surface_get_material(0) as StandardMaterial3D).duplicate() as StandardMaterial3D
+			m.albedo_color = color.lightened(0.25)
+			mi.material_override = m
+	_anim = _model.find_child("AnimationPlayer", true, false)
+	for a in LOOPING:
+		if _anim.has_animation(a):
+			_anim.get_animation(a).loop_mode = Animation.LOOP_LINEAR
+	_anim.play("Idle")
+
+
+## Joue une animation ponctuelle (lancer de sort, coup reçu…)
+func play_action(anim_name: String, lock := 0.5) -> void:
+	if _anim == null or not _anim.has_animation(anim_name):
+		return
+	_anim.play(anim_name, 0.1)
+	_anim_lock = lock
+
+
+func _update_animation(delta: float) -> void:
+	if _anim == null or not _wizard_vis.visible:
+		return
+	_anim_lock -= delta
+	if _anim_lock > 0.0:
+		return
+	var vel := velocity if is_multiplayer_authority() else _remote_vel
+	var flat := Vector3(vel.x, 0, vel.z)
+	var local_v := global_transform.basis.inverse() * flat
+	var want := "Idle"
+	if incanting or _key_spell != "":
+		want = "Spellcasting"
+	elif absf(vel.y) > 2.5:
+		want = "Jump_Idle"
+	elif flat.length() > 0.8:
+		if local_v.z > 0.5 and absf(local_v.z) > absf(local_v.x):
+			want = "Walking_Backwards"
+		else:
+			want = "Running_A" if flat.length() > 4.0 else "Walking_A"
+	if _anim.current_animation != want:
+		_anim.play(want, 0.15)
 
 
 func _build_chicken() -> void:
@@ -360,7 +403,7 @@ func _move(delta: float, input: Vector2, jump: bool, sprint: bool) -> void:
 		if wish != Vector3.ZERO:
 			var add := clampf(speed - horiz.dot(wish), 0.0, AIR_ACCEL * delta)
 			horiz += wish * add
-		velocity.y -= GRAVITY * delta
+		velocity.y -= GRAVITY * main.gravity_scale() * delta
 	velocity.x = horiz.x
 	velocity.z = horiz.z
 	move_and_slide()
@@ -376,7 +419,7 @@ func _bot_move(delta: float, input: Vector2, jump: bool) -> void:
 		if jump:
 			velocity.y = JUMP
 	else:
-		velocity.y -= GRAVITY * delta
+		velocity.y -= GRAVITY * main.gravity_scale() * delta
 	velocity.x = horiz.x
 	velocity.z = horiz.z
 	if wish.length() > 0.1:
@@ -422,7 +465,7 @@ func _handle_casting_input(delta: float) -> void:
 				var power := clampf(0.7 + _key_t, 0.7, 2.7)
 				_key_spell = ""
 				incant_charge = 0.0
-				cast_spell(Spells.LIST[i].id, power, PackedFloat32Array())
+				cast_spell(main.remap_spell(Spells.LIST[i].id), power, PackedFloat32Array())
 
 
 func _finish_incantation(cancel: bool) -> void:
@@ -436,10 +479,21 @@ func _finish_incantation(cancel: bool) -> void:
 		main.hud.show_result("… (rien entendu)", Color(0.8, 0.8, 0.8))
 		return
 	var res: Dictionary = main.recognizer.classify(info.feat)
-	if res.ok:
-		cast_spell(res.id, Spells.power_from_voice(info.duration, info.level), clip)
-	else:
+	if not res.ok:
 		misfire(clip)
+		return
+	var power := Spells.power_from_voice(info.duration, info.level)
+	match main.rule:
+		"chuchotements":
+			if info.level > Spells.WHISPER_MAX:
+				misfire(clip, "Trop fort ! (volume %d %%) Il fallait chuchoter…" % int(info.level * 100))
+				return
+		"opera":
+			if info.duration < 0.9:
+				misfire(clip, "Trop court ! Ici, il faut CHANTER et tenir la note…")
+				return
+			power *= 1.5
+	cast_spell(main.remap_spell(res.id), power, clip)
 
 
 func cast_spell(id: String, power: float, clip: PackedFloat32Array) -> void:
@@ -458,9 +512,9 @@ func cast_spell(id: String, power: float, clip: PackedFloat32Array) -> void:
 	main.request_cast(String(name), id, power, _wand_tip.global_position, dir, "", clip)
 
 
-func misfire(clip: PackedFloat32Array) -> void:
+func misfire(clip: PackedFloat32Array, reason := "") -> void:
 	var kind: String = Spells.MISFIRES.pick_random()
-	main.hud.show_result(Spells.MISFIRE_TEXT[kind], Color(1, 0.5, 0.4))
+	main.hud.show_result((reason + "\n" if reason != "" else "") + Spells.MISFIRE_TEXT[kind], Color(1, 0.5, 0.4))
 	main.request_cast(String(name), "", 0.7, _wand_tip.global_position, -camera.global_transform.basis.z, kind, clip)
 
 
@@ -481,8 +535,8 @@ func _refresh_visuals() -> void:
 		return
 	var chicken := has_status("chicken")
 	_chicken_vis.visible = alive and chicken and not is_local()
-	_wizard_vis.visible = alive and not chicken and not is_local()
-	_wand.visible = alive and not chicken
+	_wizard_vis.visible = not chicken and not is_local() and (alive or _anim_lock > 0.0)
+	_wand.visible = alive and not chicken and is_local()
 	_label.visible = alive and not is_local()
 	_shield_vis.visible = alive and has_status("shield")
 	_cage_vis.visible = alive and has_status("cage")
@@ -496,7 +550,13 @@ func die() -> void:
 	velocity = Vector3.ZERO
 	statuses.clear()
 	_shape.set_deferred("disabled", true)
+	if not is_local():
+		play_action("Death_A", 2.5)
+		_anim.queue("Death_A_Pose")
 	_refresh_visuals()
+	get_tree().create_timer(2.5).timeout.connect(func():
+		if is_instance_valid(self) and not alive:
+			_wizard_vis.visible = false)
 
 
 func respawn(pos: Vector3, yaw: float) -> void:
@@ -510,6 +570,7 @@ func respawn(pos: Vector3, yaw: float) -> void:
 	head.rotation.x = 0.0
 	_net_xform = global_transform
 	_shape.set_deferred("disabled", false)
+	_anim_lock = 0.0
 	_refresh_visuals()
 
 
@@ -530,6 +591,10 @@ func _process(delta: float) -> void:
 		var t := clampf(delta * 18.0, 0.0, 1.0)
 		global_transform = global_transform.interpolate_with(_net_xform, t)
 		head.rotation.x = lerpf(head.rotation.x, _net_pitch, t)
+	if delta > 0.0:
+		_remote_vel = _remote_vel.lerp((global_position - _last_pos) / delta, clampf(delta * 10.0, 0.0, 1.0))
+		_last_pos = global_position
+	_update_animation(delta)
 	# Durée des états (localement chez tout le monde)
 	var changed := false
 	for k in statuses.keys():

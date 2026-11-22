@@ -8,6 +8,9 @@ const PORT := 7777
 const MAX_CLIENTS := 8
 const RESPAWN_DELAY := 6.0
 const MAX_TRAPS := 3
+const ROUND_TIME := 150.0
+const INTERMISSION := 8.0
+const CROWN_HOME := Vector3(0, 0.45, 0)     # au milieu du pont, au-dessus de la lave !
 const PALETTE := [Color("#d64545"), Color("#3f7fd6"), Color("#e0b030"), Color("#4caf50"),
 	Color("#9c5bd6"), Color("#e07a30"), Color("#d6488f"), Color("#30b8b0")]
 
@@ -25,6 +28,14 @@ var projectiles := {}       # id -> Projectile
 var traps := {}             # id -> Trap
 var last_clip := {}         # magicien -> dernière incantation (16 kHz)
 var in_game := false
+var mode := "bataille"           # bataille | roi
+var rule := "normal"             # règle loufoque de la manche
+var rule_map := {}               # Grimoire maudit : sort prononcé -> sort lancé
+var round_num := 0
+var round_left := 0.0
+var intermission := false
+var crown_holder := ""
+var crown_pos := CROWN_HOME
 
 var _last_attacker := {}    # victime -> [attaquant, heure]
 var _next_id := 1
@@ -40,6 +51,10 @@ var _status: Label
 var _buttons: Array = []
 var _menu_cam: Camera3D
 var _orbit := 0.0
+var _mode_opt: OptionButton
+var _crown: Node3D
+var _crown_cd := {}              # magicien -> temps avant de pouvoir reprendre la couronne
+var _stats_sync_t := 0.0
 
 
 func _ready() -> void:
@@ -74,6 +89,7 @@ func _ready() -> void:
 	add_child(_menu_cam)
 	_menu_cam.current = true
 	_build_menu()
+	_build_crown()
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
 	multiplayer.connected_to_server.connect(_on_connected)
 	multiplayer.connection_failed.connect(_on_connection_failed)
@@ -215,6 +231,17 @@ func _build_menu() -> void:
 	jr.add_child(join)
 	vb.add_child(jr)
 	_buttons = [solo, host, join]
+	var mrow := HBoxContainer.new()
+	var mlabel := Label.new()
+	mlabel.text = "Mode (hôte) :"
+	mlabel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mrow.add_child(mlabel)
+	_mode_opt = OptionButton.new()
+	for k in Spells.MODES:
+		_mode_opt.add_item(Spells.MODES[k][0])
+	mrow.add_child(_mode_opt)
+	vb.add_child(mrow)
+	vb.move_child(mrow, vb.get_child_count() - 4)
 	_status = Label.new()
 	_status.modulate = Color(1, 0.8, 0.4)
 	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -261,11 +288,13 @@ func _on_join() -> void:
 
 
 func _start_server() -> void:
+	mode = Spells.MODES.keys()[_mode_opt.selected]
 	_enter_game()
 	_server_add("1", _pname(), false, 1)
 	for i in int(_bots_spin.value):
 		_bot_count += 1
 		_server_add("bot_%d" % _bot_count, "Mannequin %d" % _bot_count, true, 1)
+	get_tree().create_timer(1.0).timeout.connect(_server_round_start)
 
 
 func _enter_game() -> void:
@@ -312,6 +341,8 @@ func _on_peer_disconnected(id: int) -> void:
 
 func _process(delta: float) -> void:
 	_capture_grace = maxf(0.0, _capture_grace - delta)
+	round_left = maxf(0.0, round_left - delta)
+	_update_crown_visual(delta)
 	if not in_game:
 		_orbit += delta * 0.1
 		_menu_cam.position = Vector3(cos(_orbit) * 20.0, 9.0, sin(_orbit) * 20.0)
@@ -321,6 +352,7 @@ func _process(delta: float) -> void:
 func _physics_process(_delta: float) -> void:
 	if not in_game or not multiplayer.is_server():
 		return
+	_server_round_tick(_delta)
 	var now := Time.get_ticks_msec() / 1000.0
 	for n in players.keys():
 		var p: Wizard = players.get(n)
@@ -391,7 +423,10 @@ func _server_add(node_name: String, display: String, is_bot: bool, authority: in
 				p.global_position, p.rotation.y, p.hp, p.alive)
 	var sp := _pick_spawn()
 	spawn_player.rpc(node_name, display, is_bot, col, authority, sp, _yaw_to_center(sp), 100, true)
-	stats[node_name] = {"name": display, "kills": 0, "deaths": 0}
+	if authority != 1 and round_num > 0:
+		round_started.rpc_id(authority, round_num, mode, rule, rule_map, round_left)
+		crown_update.rpc_id(authority, crown_holder, crown_pos)
+	stats[node_name] = {"name": display, "kills": 0, "deaths": 0, "points": 0.0}
 	sync_stats.rpc(stats)
 
 
@@ -447,13 +482,14 @@ func remove_player(n: String) -> void:
 @rpc("authority", "call_local", "reliable")
 func sync_stats(s: Dictionary) -> void:
 	stats = s
-	hud.update_scores(stats)
+	hud.update_scores(stats, mode)
 
 
 # ================================================================== Voix
 
 ## Appelé par VoiceSystem à la réception d'un paquet de voix.
 func route_voice(sender: String, samples: PackedFloat32Array) -> void:
+	server_on_speaking(sender)
 	var p: Wizard = players.get(sender)
 	if p == null:
 		return
@@ -494,6 +530,8 @@ func _server_cast(caster: String, spell: String, power: float, origin: Vector3, 
 		return
 	power = clampf(power, 0.5, 3.0)
 	dir = dir.normalized()
+	if caster == crown_holder:
+		_server_drop_crown("%s a lancé un sort et perd la couronne !" % p.display_name)
 	if origin.distance_to(p.global_position) > 3.0:
 		origin = p.head.global_position
 	var kind := spell
@@ -522,6 +560,9 @@ func _server_cast(caster: String, spell: String, power: float, origin: Vector3, 
 func cast_fx(caster: String, kind: String, power: float, origin: Vector3, dir: Vector3, pid: int, data: PackedByteArray) -> void:
 	if not data.is_empty():
 		last_clip[caster] = VoiceSystem.decode(data)
+	var cp: Wizard = players.get(caster)
+	if cp != null and kind != "misfire":
+		cp.play_action("Spellcast_Shoot", 0.6)
 	if pid > 0:
 		var pr := Projectile.new()
 		pr.main = self
@@ -609,6 +650,8 @@ func _server_kill(victim: String, killer: String, cause: String) -> void:
 	var p: Wizard = players.get(victim)
 	if p == null or not p.alive:
 		return
+	if victim == crown_holder:
+		_server_drop_crown("%s perd la couronne !" % p.display_name)
 	if stats.has(victim):
 		stats[victim].deaths += 1
 	if killer != victim and stats.has(killer):
@@ -629,6 +672,8 @@ func sync_hp(n: String, hp: int) -> void:
 		return
 	if hp < p.hp and p.is_local():
 		hud.flash()
+	if hp < p.hp and hp > 0:
+		p.play_action("Hit_A", 0.4)
 	p.hp = hp
 
 
@@ -636,7 +681,7 @@ func sync_hp(n: String, hp: int) -> void:
 func knockback(n: String, v: Vector3) -> void:
 	var p: Wizard = players.get(n)
 	if p != null and p.is_multiplayer_authority():
-		p.apply_knockback(v)
+		p.apply_knockback(v * (1.8 if rule == "lune" else 1.0))
 
 
 @rpc("authority", "call_local", "reliable")
@@ -859,3 +904,198 @@ func _burst(pos: Vector3, col: Color, radius: float) -> void:
 	tw.tween_property(mi, "scale", Vector3.ONE * radius, 0.25)
 	tw.tween_property(m, "albedo_color:a", 0.0, 0.45)
 	tw.chain().tween_callback(mi.queue_free)
+
+
+# ================================================================== Manches et règles loufoques
+
+func gravity_scale() -> float:
+	return 0.4 if rule == "lune" else 1.0
+
+
+func remap_spell(id: String) -> String:
+	return rule_map.get(id, id)
+
+
+func _server_round_start() -> void:
+	if not multiplayer.is_server():
+		return
+	round_num += 1
+	var choices := Spells.RULES.keys()
+	if round_num > 1:
+		choices.erase(rule)
+	var new_rule: String = "normal" if round_num == 1 and players.size() <= 1 else choices.pick_random()
+	var new_map := {}
+	if new_rule == "maudit":
+		var ids := []
+		for sdef in Spells.LIST:
+			ids.append(sdef.id)
+		var shuffled := ids.duplicate()
+		while shuffled == ids:
+			shuffled.shuffle()
+		for i in ids.size():
+			new_map[ids[i]] = shuffled[i]
+	for n in stats:
+		stats[n].kills = 0
+		stats[n].deaths = 0
+		stats[n].points = 0.0
+	for tid in traps.keys():
+		remove_trap.rpc(tid, false)
+	round_started.rpc(round_num, mode, new_rule, new_map, ROUND_TIME)
+	for n in players:
+		var sp := _pick_spawn()
+		respawn_player.rpc(n, sp, _yaw_to_center(sp))
+		if new_rule == "poulailler":
+			set_status.rpc(n, "chicken", 20.0, "")
+	_crown_cd.clear()
+	crown_update.rpc("", CROWN_HOME)
+	sync_stats.rpc(stats)
+
+
+@rpc("authority", "call_local", "reliable")
+func round_started(num: int, m: String, r: String, rmap: Dictionary, time_left: float) -> void:
+	round_num = num
+	mode = m
+	rule = r
+	rule_map = rmap
+	round_left = time_left
+	intermission = false
+	var rd: Array = Spells.RULES[r]
+	var md: Array = Spells.MODES[m]
+	hud.set_round("MANCHE %d — %s · %s" % [num, md[0], rd[0]], "%s\n%s" % [rd[1], md[1]])
+	hud.show_center("MANCHE %d\n%s\n%s" % [num, rd[0].to_upper(), rd[1]], 5.0)
+
+
+func _server_round_tick(delta: float) -> void:
+	if round_num == 0:
+		return
+	if not intermission and round_left <= 0.0:
+		intermission = true
+		var best := ""
+		var best_score := -INF
+		for n in stats:
+			var sc: float = stats[n].points if mode == "roi" else stats[n].kills * 100.0 - stats[n].deaths
+			if sc > best_score:
+				best_score = sc
+				best = n
+		round_ended.rpc(best)
+		get_tree().create_timer(INTERMISSION).timeout.connect(_server_round_start)
+		return
+	if intermission or mode != "roi":
+		return
+	# Roi du silence : ramassage et points
+	for k in _crown_cd.keys():
+		_crown_cd[k] -= delta
+		if _crown_cd[k] <= 0.0:
+			_crown_cd.erase(k)
+	if crown_holder == "":
+		for n in players:
+			var p: Wizard = players[n]
+			if p.alive and not _crown_cd.has(n) and p.global_position.distance_to(crown_pos) < 1.4:
+				crown_update.rpc(n, crown_pos)
+				feed.rpc("%s prend la couronne… chut !" % p.display_name)
+				break
+	elif stats.has(crown_holder):
+		stats[crown_holder].points += delta
+	_stats_sync_t -= delta
+	if _stats_sync_t <= 0.0:
+		_stats_sync_t = 1.0
+		sync_stats.rpc(stats)
+
+
+@rpc("authority", "call_local", "reliable")
+func round_ended(winner: String) -> void:
+	intermission = true
+	round_left = 0.0
+	var w: Wizard = players.get(winner)
+	var wname := w.display_name if w != null else "Personne"
+	hud.show_center("FIN DE LA MANCHE\n%s gagne !\n\nProchaine manche dans %d s…" % [wname, int(INTERMISSION)], INTERMISSION)
+	hud.show_scores_for(INTERMISSION)
+	if w != null:
+		w.play_action("Cheer", INTERMISSION)
+
+
+# ================================================================== Roi du silence
+
+## Appelé quand un magicien parle (voix reçue par le serveur, ou voix de l'hôte).
+func server_on_speaking(n: String) -> void:
+	if multiplayer.is_server() and mode == "roi" and n == crown_holder and crown_holder != "":
+		_server_drop_crown("%s a parlé… et perd la couronne !" % _dname(n))
+
+
+## Appelé par VoiceSystem quand le joueur local parle.
+func on_local_voice_activity() -> void:
+	if in_game and multiplayer.is_server():
+		server_on_speaking(str(multiplayer.get_unique_id()))
+
+
+func _server_drop_crown(msg: String) -> void:
+	if crown_holder == "":
+		return
+	var p: Wizard = players.get(crown_holder)
+	var pos := CROWN_HOME
+	if p != null:
+		pos = p.global_position + Vector3.DOWN * 0.45
+		if absf(pos.x) < Arena.PIT + 0.5 and absf(pos.z) < Arena.PIT + 0.5 and (absf(pos.z) > 1.1 or pos.y < -0.5):
+			pos = CROWN_HOME   # tombée dans la lave : elle revient sur le pont
+	_crown_cd[crown_holder] = 2.0
+	crown_update.rpc("", pos)
+	feed.rpc(msg)
+
+
+@rpc("authority", "call_local", "reliable")
+func crown_update(holder: String, pos: Vector3) -> void:
+	crown_holder = holder
+	crown_pos = pos
+	var lp := local_player()
+	if lp != null and holder == String(lp.name):
+		hud.show_center("Vous avez la couronne !\nNE DITES PLUS UN MOT.", 3.0)
+
+
+func _build_crown() -> void:
+	_crown = Node3D.new()
+	add_child(_crown)
+	var gold := StandardMaterial3D.new()
+	gold.albedo_color = Color("#ffcc33")
+	gold.metallic = 0.9
+	gold.roughness = 0.25
+	gold.emission_enabled = true
+	gold.emission = Color("#ffb000")
+	gold.emission_energy_multiplier = 0.6
+	var ring := MeshInstance3D.new()
+	var cm := CylinderMesh.new()
+	cm.top_radius = 0.3
+	cm.bottom_radius = 0.3
+	cm.height = 0.18
+	ring.mesh = cm
+	ring.material_override = gold
+	_crown.add_child(ring)
+	for i in 5:
+		var spike := MeshInstance3D.new()
+		var sm := CylinderMesh.new()
+		sm.top_radius = 0.0
+		sm.bottom_radius = 0.08
+		sm.height = 0.22
+		spike.mesh = sm
+		spike.material_override = gold
+		var a := i * TAU / 5.0
+		spike.position = Vector3(cos(a) * 0.26, 0.19, sin(a) * 0.26)
+		_crown.add_child(spike)
+	var l := OmniLight3D.new()
+	l.light_color = Color("#ffd060")
+	l.light_energy = 1.5
+	l.omni_range = 4.0
+	_crown.add_child(l)
+	_crown.visible = false
+
+
+func _update_crown_visual(delta: float) -> void:
+	_crown.visible = in_game and mode == "roi" and round_num > 0
+	if not _crown.visible:
+		return
+	var holder: Wizard = players.get(crown_holder)
+	if holder != null and holder.alive:
+		_crown.global_position = holder.global_position + Vector3.UP * (1.25 if not holder.is_local() else 3.0)
+		_crown.visible = not holder.is_local()
+	else:
+		_crown.global_position = crown_pos + Vector3.UP * (0.15 + sin(Time.get_ticks_msec() / 400.0) * 0.08)
+	_crown.rotate_y(delta * 1.5)
